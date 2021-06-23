@@ -1,0 +1,14 @@
+{application, jsv,
+ [{description, "A simple JSON schema validator"},
+  {vsn, "0.0.2"},
+  {registered, []},
+  {applications,
+   [kernel,
+    stdlib
+   ]},
+  {env,[]},
+  {modules, []},
+
+  {licenses, ["Apache 2.0"]},
+  {links, []}
+ ]}.
