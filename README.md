@@ -50,4 +50,4 @@ It currently passes 4849 of the 5525 tests in the repository (due to the lack of
 
 Issues and pull requests are most welcome.
 
-Regarding validation errors, keep in mind that jsv was tested with the [JSON Schema Test Suite](https://github.com/json-schema-org/JSON-Schema-Test-Suite) in mind, if you find a schema that should validate but doesn't (or viceversa), please consider contributing a new test for that repository as well.
+Regarding validation errors, keep in mind that jsv was tested with the [JSON Schema Test Suite](https://github.com/json-schema-org/JSON-Schema-Test-Suite), if you find a schema that should validate but doesn't (or viceversa), please consider contributing a new test for that repository as well.
