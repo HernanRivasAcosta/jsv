@@ -34,7 +34,7 @@ This will generate a suite for each JSON file on the tests directory from JSON-S
 rebar3 ct
 ```
 
-It currently passes 4849 of the 5525 tests in the repository (due to the lack of refs, defs and anchors). The aim is to reach 5525.
+It currently passes 5873 of the 6546 tests in the repository (due to the lack of refs, defs and anchors). The aim is to reach 6546.
 
 ## Limitations
 

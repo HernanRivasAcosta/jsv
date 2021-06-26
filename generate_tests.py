@@ -54,11 +54,14 @@ def uniqueAtomName(name, names, counter = 0):
   else:
     return atomName
 
+# Generates way more readable tests than printableBinaryJSON, but it causes some
+# tests to fail because of utf-8 issues
 def printableJSON(JSON):
   # Double dumping escapes all quotation marks
   return json.dumps(json.dumps(JSON, ensure_ascii=False), ensure_ascii=False)
 
-# Same as printableJSON, but generates the binary representation of the string
+# Same as printableJSON, but this version generates the binary representation of
+# the string which solves utf-8 issues
 def printableBinaryJSON(JSON):
   string = json.dumps(JSON, ensure_ascii=False)
   encodedString = string.encode('utf8')
@@ -82,11 +85,11 @@ if not os.path.exists(generatedTestsPath):
 if (len(sys.argv) > 1 and sys.argv[1] != 'all'):
   suites = [sys.argv[1]]
 else:
-  suites = os.listdir(testsPath)
+  suites = filter(lambda f: not os.path.islink(f), os.listdir(testsPath))
 
 for suite in suites:
   suitePath = os.path.join(testsPath, suite)
-  if (os.path.isdir(suitePath) and not os.path.islink(suitePath)):
+  if (os.path.isdir(suitePath)):
     for test in os.listdir(suitePath):
       if (test.endswith('.json')):
         testPath = os.path.join(suitePath, test)
@@ -99,7 +102,7 @@ for suite in suites:
           for group in testJSON:
             groupName = uniqueAtomName(group['description'], groupNames)
             groupNames.append(groupName)
-            groups[groupName] = {'schema': printableJSON(group['schema']),
+            groups[groupName] = {'schema': printableBinaryJSON(group['schema']),
                                  'caseNames': [],
                                  'cases': []}
             for case in group['tests']:
@@ -108,7 +111,7 @@ for suite in suites:
               caseNames.append(name)
               groups[groupName]['caseNames'].append(name)
               testCase = {'name': name,
-                          'data': printableJSON(case['data']),
+                          'data': printableBinaryJSON(case['data']),
                           'valid': case['valid']}
               groups[groupName]['cases'].append(testCase)
 
@@ -118,6 +121,8 @@ for suite in suites:
         # Mandatory exports
         content += '-export([all/0,\n'\
                    '         groups/0,\n'\
+                   '         init_per_suite/1,\n'\
+                   '         end_per_suite/1,\n'\
                    '         init_per_group/2,\n'\
                    '         end_per_group/2'
         # Export all test cases
@@ -139,32 +144,42 @@ for suite in suites:
         # Close the group list
         content += '].\n\n'
         # Add the init functions
+        content += '-spec init_per_suite(config()) -> config().\n'
+        content += 'init_per_suite(Config) ->\n'
+        content += '  Remotes = #{},\n'
+        content += '  [{remotes, Remotes} | Config].\n\n'
         content += '-spec init_per_group(atom(), config()) -> config().\n'
         for groupName, groupData in groups.items():
-          content += f'init_per_group({groupName}, _Config) ->\n'
+          content += f'init_per_group({groupName}, Config) ->\n'
           content += f'  Schema = jiffy:decode(<<{groupData["schema"]}>>, [return_maps]),\n'
-          content +=  '  [{schema, Schema}];\n'
+          content +=  '  lists:keystore(schema, 1, Config, {schema, Schema});\n'
         content = content[:-2] + '.\n\n'
         # Add the end per group function
         content += '-spec end_per_group(atom(), config()) -> config().\n'
         content += 'end_per_group(_, Config) ->\n'
-        content += '  Config.\n'
+        content += '  Config.\n\n'
+        # Add the end per suite function
+        content += '-spec end_per_suite(config()) -> config().\n'
+        content += 'end_per_suite(Config) ->\n'
+        content += '  Config.'
         # Add all the tests
         for groupName, groupData in groups.items():
           for testCase in groupData['cases']:
             name = testCase['name']
-            content += f'\n-spec {name}(config()) -> ok.\n'
+            content += f'\n\n-spec {name}(config()) -> ok.\n'
             content += f'{name}(Config) ->\n'
+            content +=  '  Remotes = proplists:get_value(remotes, Config),\n'
             content +=  '  Schema = proplists:get_value(schema, Config),\n'
             content += f'  Data = jiffy:decode(<<{testCase["data"]}>>, [return_maps]),\n'
             if (testCase['valid']):
-              content += '  ct:pal("data: ~p, schema: ~p, expected: ~p", [Data, Schema, true]),\n'
+              content += '  ct:log("data: ~p, schema: ~p, expected: ~p", [Data, Schema, true]),\n'
               content += '  true = '
             else:
-              content += '  ct:pal("data: ~p, schema: ~p, expected: ~p", [Data, Schema, false]),\n'
+              content += '  ct:log("data: ~p, schema: ~p, expected: ~p", [Data, Schema, false]),\n'
               content += '  false = '
-            content += 'jsv:validate(Data, Schema),\n'
-            content += '  ok.\n'
+            #content += '  _ = '
+            content += 'jsv:validate(Data, Schema, Remotes),\n'
+            content += '  ok.'
         # Write the file
         with open(os.path.join(generatedTestsPath, suiteName + '.erl'), 'w') as f:
           f.write(content)

@@ -9,15 +9,20 @@
 %%==============================================================================
 -spec validate(map(), map()) -> boolean().
 validate(JSON, Schema) ->
-  do_validate(Schema, JSON, #{schemas => #{}}).
+  validate(JSON, Schema, #{}).
 
 -spec validate(map(), map(), map()) -> boolean().
 validate(JSON, Schema, Schemas) ->
-  do_validate(Schema, JSON, #{schemas => Schemas}).
+  do_validate(Schema, JSON, #{root => Schema,
+                              defs => #{},
+                              remotes => Schemas}).
 
 %%==============================================================================
 %% Checks
 %%==============================================================================
+do_validate(#{<<"$defs">> := NewDefs} = Schema, JSON, State = #{defs := Defs}) ->
+  NewState = State#{defs => maps:merge(NewDefs, Defs)},
+  do_validate(maps:without([<<"$defs">>], Schema), JSON, NewState);
 do_validate(#{<<"type">> := Type} = Schema, JSON, State) ->
   is_of_type(Type, JSON) andalso
   do_validate(maps:without([<<"type">>], Schema), JSON, State);
@@ -25,15 +30,15 @@ do_validate(#{<<"pattern">> := Pattern} = Schema, JSON, State) ->
   matches_pattern(Pattern, JSON) andalso
   do_validate(maps:without([<<"pattern">>], Schema), JSON, State);
 do_validate(#{<<"propertyNames">> := PropertyNames} = Schema, JSON, State) ->
-  property_names_match(PropertyNames, JSON) andalso
+  property_names_match(PropertyNames, JSON, State) andalso
   do_validate(maps:without([<<"propertyNames">>], Schema), JSON, State);
 do_validate(#{<<"properties">> := Properties} = Schema, JSON, State) ->
   NewState = State#{properties => Properties},
-  matches_properties(Properties, JSON) andalso
+  matches_properties(Properties, JSON, State) andalso
   do_validate(maps:without([<<"properties">>], Schema), JSON, NewState);
 do_validate(#{<<"patternProperties">> := Properties} = Schema, JSON, State) ->
   NewState = State#{pattern_properties => Properties},
-  matches_pattern_properties(Properties, JSON) andalso
+  matches_pattern_properties(Properties, JSON, State) andalso
   do_validate(maps:without([<<"patternProperties">>], Schema), JSON, NewState);
 do_validate(#{<<"additionalProperties">> := Properties} = Schema, JSON, State) ->
   validate_additional_properties(Properties, JSON, State) andalso
@@ -89,7 +94,7 @@ do_validate(#{<<"allOf">> := AllOf} = Schema, JSON, State) ->
   do_validate(NewMap, JSON, State);
 do_validate(#{<<"prefixItems">> := PrefixItems} = Schema, JSON, State) ->
   NewState = State#{prefix_items => PrefixItems},
-  prefix_matches(PrefixItems, JSON) andalso
+  prefix_matches(PrefixItems, JSON, State) andalso
   do_validate(maps:without([<<"prefixItems">>], Schema), JSON, NewState);
 do_validate(#{<<"items">> := Items} = Schema, JSON, State) ->
   NewState = State#{items => Items},
@@ -111,29 +116,36 @@ do_validate(#{<<"contains">> := Contains} = Schema, JSON, State) ->
                      error -> {undefined, Schema3};
                      R2 -> R2
                    end,
-  contains(Contains, Min, Max, JSON) andalso
+  contains(Contains, Min, Max, JSON, State) andalso
   do_validate(Schema4, JSON, State);
 do_validate(#{<<"not">> := Items} = Schema, JSON, State) ->
-  items_dont_match(Items, JSON) andalso
+  items_dont_match(Items, JSON, State) andalso
   do_validate(maps:without([<<"not">>], Schema), JSON, State);
 do_validate(#{<<"anyOf">> := AnyOf} = Schema, JSON, State) ->
-  case contains_any_of(AnyOf, JSON) of
+  case contains_any_of(AnyOf, JSON, State) of
     false ->
       false;
     true ->
       do_validate(maps:without([<<"anyOf">>], Schema), JSON, State);
     {true, MatchingSchema} ->
-      NewState = case maps:find(<<"prefixItems">>, MatchingSchema) of
+      NewState = case is_map(MatchingSchema) andalso
+                      maps:find(<<"prefixItems">>, MatchingSchema) of
                    {ok, PrefixItems} ->
                      State#{prefix_items => PrefixItems};
-                   error ->
+                   _ ->
                      State
                  end,
       do_validate(maps:without([<<"anyOf">>], Schema), JSON, NewState)
   end;
 do_validate(#{<<"oneOf">> := OneOf} = Schema, JSON, State) ->
-  contains_one_of(OneOf, JSON) andalso
+  contains_one_of(OneOf, JSON, State) andalso
   do_validate(maps:without([<<"oneOf">>], Schema), JSON, State);
+do_validate(#{<<"$ref">> := Ref} = Schema, JSON, State) when is_binary(Ref) ->
+  handle_ref(Ref, JSON, State) andalso
+  do_validate(maps:without([<<"$ref">>], Schema), JSON, State);
+do_validate(#{<<"$dynamicRef">> := Ref} = Schema, JSON, State) when is_binary(Ref) ->
+  handle_ref(Ref, JSON, State) andalso
+  do_validate(maps:without([<<"$dynamicRef">>], Schema), JSON, State);
 do_validate(true, _JSON, _State) ->
   true;
 do_validate(false, _JSON, _State) ->
@@ -171,28 +183,32 @@ matches_pattern(Pattern, Binary) when is_binary(Binary) ->
 matches_pattern(_Pattern, _JSON) ->
   true.
 
-property_names_match(Schema, Object) when is_map(Object) ->
+property_names_match(Schema, Object, State) when is_map(Object) ->
   lists:all(fun(K) ->
-              do_validate(Schema, K, #{})
+              validate_nested(Schema, K, State)
             end, maps:keys(Object));
-property_names_match(_Schema, _JSON) ->
+property_names_match(_Schema, _JSON, _State) ->
   true.
 
-matches_properties(Properties, Object) when is_map(Object) ->
+matches_properties(Properties, Object, State) when is_map(Object) ->
   maps:fold(fun(_Key, _Schema, false) ->
                  false;
+               (<<"$ref">>, Ref, true) when is_binary(Ref) ->
+                 handle_ref(Ref, Object, State);
+               (<<"$dynamicRef">>, Ref, true) when is_binary(Ref) ->
+                 handle_ref(Ref, Object, State);
                (Key, Schema, true) ->
                  case maps:find(Key, Object) of
                    {ok, JSON} ->
-                     do_validate(Schema, JSON, #{});
+                     validate_nested(Schema, JSON, State);
                    error ->
                      true
                  end
             end, true, Properties);
-matches_properties(_Properties, _JSON) ->
+matches_properties(_Properties, _JSON, _State) ->
   true.
 
-matches_pattern_properties(PatternProperties, Object) when is_map(Object) ->
+matches_pattern_properties(Patterns, Object, State) when is_map(Object) ->
   maps:fold(fun(_Pattern, _Schema, false) ->
                  false;
                (Pattern, Schema, true) ->
@@ -201,13 +217,13 @@ matches_pattern_properties(PatternProperties, Object) when is_map(Object) ->
                               (Key, Value, true) ->
                                 case re:run(Key, Pattern) of
                                   {match, _Captured} ->
-                                    do_validate(Schema, Value, #{});
+                                    validate_nested(Schema, Value, State);
                                   nomatch ->
                                     true
                                 end
                            end, true, Object)
-            end, true, PatternProperties);
-matches_pattern_properties(_PatternProperties, _JSON) ->
+            end, true, Patterns);
+matches_pattern_properties(_PatternProperties, _JSON, _State) ->
   true.
 
 validate_additional_properties(false, Object, State) when is_map(Object) ->
@@ -246,7 +262,7 @@ validate_additional_properties(Schema, Object, State) when is_map(Object) ->
                              end
                            end, PatternProperties) orelse
                  % They need to validate
-                 do_validate(Schema, Value, #{})
+                 validate_nested(Schema, Value, State)
             end, true, Object);
 validate_additional_properties(_Schema, _JSON, _State) ->
   true.
@@ -316,7 +332,8 @@ matches_enum(Enum, Element) ->
               equals_const(E, Element)
             end, Enum).
 
-contains_required_props(Required, Object) when is_map(Object), is_list(Required) ->
+contains_required_props(Required, Object) when is_map(Object),
+                                               is_list(Required) ->
   lists:all(fun(Property) ->
               maps:is_key(Property, Object)
             end, Required);
@@ -337,11 +354,11 @@ items_match(Schema, List, State) when is_list(List) ->
                      (_E, []) ->
                        true;
                      (E, [SubSchema | T]) ->
-                       do_validate(SubSchema, E, #{}) andalso T
+                       validate_nested(SubSchema, E, State) andalso T
                   end, Schema, NonPrefixedList) =/= false;
     _ ->
       lists:all(fun(Element) ->
-                  do_validate(Schema, Element, #{})
+                  validate_nested(Schema, Element, State)
                 end, NonPrefixedList)
   end;
 items_match(_Schema, _JSON, _State) ->
@@ -352,14 +369,13 @@ check_unevaluated_items(_, List, #{items := true}) when is_list(List) ->
 check_unevaluated_items(true, List, _State) when is_list(List) ->
   true;
 check_unevaluated_items(Schema, List, State) when is_list(List) ->
-  List2 = remove_prefix(maps:get(prefix_items, State, []), List),
+  List2 = remove_prefix(maps:get(prefix_items, State, []), List, State),
   ItemsSchema = maps:get(items, State, false),
   List3 = lists:filter(fun(Item) ->
-                         not do_validate(ItemsSchema, Item, #{})
+                         not validate_nested(ItemsSchema, Item, State)
                        end, List2),
-  %io:format("~nSchema: ~p~nState: ~p~nList: ~p~nList2: ~p~nList3: ~p~n", [Schema, State, List, List2, List3]),
   lists:all(fun(Item) ->
-              do_validate(Schema, Item, #{})
+              validate_nested(Schema, Item, State)
             end, List3);
 check_unevaluated_items(_Items, _JSON, _State) ->
   true.
@@ -371,11 +387,11 @@ items_are_unique(true, List) when is_list(List) ->
 items_are_unique(_Unique, _JSON) ->
   true.
 
-contains(_Schema, _Min, 0, List) when is_list(List) ->
+contains(_Schema, _Min, 0, List, _State) when is_list(List) ->
   false;
-contains(Schema, Min, Max, List) when is_list(List) ->
+contains(Schema, Min, Max, List, State) when is_list(List) ->
   FinalCount = lists:foldl(fun(Element, Acc) ->
-                             case do_validate(Schema, Element, #{}) of
+                             case validate_nested(Schema, Element, State) of
                                true ->
                                  Acc + 1;
                                false ->
@@ -383,47 +399,51 @@ contains(Schema, Min, Max, List) when is_list(List) ->
                              end
                            end, 0, List),
   FinalCount >= Min andalso FinalCount =< Max;
-contains(_Schema, _Min, _Max, _JSON) ->
+contains(_Schema, _Min, _Max, _JSON, _State) ->
   true.
 
-prefix_matches([], List) when is_list(List) ->
+prefix_matches([], List, _State) when is_list(List) ->
   true;
-prefix_matches([Schema | T1], [JSON | T2]) ->
-  case do_validate(Schema, JSON, #{}) of
+prefix_matches([Schema | T1], [JSON | T2], State) ->
+  case validate_nested(Schema, JSON, State) of
     true ->
-      prefix_matches(T1, T2);
+      prefix_matches(T1, T2, State);
     false ->
       false
   end;
-prefix_matches(_Schemas, _JSON) ->
+prefix_matches(_Schemas, _JSON, _State) ->
   true.
 
-items_dont_match(Schema, JSON) ->
-  not do_validate(Schema, JSON, #{}).
+items_dont_match(Schema, JSON, State) ->
+  not validate_nested(Schema, JSON, State).
 
-contains_any_of(AnyOf, JSON) when is_list(AnyOf) ->
-  case first(fun(Schema) -> do_validate(Schema, JSON, #{}) end, AnyOf) of
+contains_any_of(AnyOf, JSON, State) when is_list(AnyOf) ->
+  case first(fun(Schema) -> validate_nested(Schema, JSON, State) end, AnyOf) of
     {ok, Schema} ->
       {true, Schema};
     nomatch ->
       false
   end;
-contains_any_of(_Required, _JSON) ->
+contains_any_of(_Required, _JSON, _State) ->
   true.
 
-contains_one_of(OneOf, JSON) when is_list(OneOf) ->
+contains_one_of(OneOf, JSON, State) when is_list(OneOf) ->
   lists:foldl(fun(_Schema, false) ->
                    false;
                  (Schema, not_found) ->
-                   case do_validate(Schema, JSON, #{}) of
+                   case validate_nested(Schema, JSON, State) of
                      true -> true;
                      false -> not_found
                    end;
                  (Schema, true) ->
-                   not do_validate(Schema, JSON, #{})
+                   not validate_nested(Schema, JSON, State)
               end, not_found, OneOf) =:= true;
-contains_one_of(_Required, _JSON) ->
+contains_one_of(_Required, _JSON, _State) ->
   true.
+
+handle_ref(Ref, JSON, State) ->
+  % Don't call validate_nested
+  do_validate(get_refd_element(Ref, State), JSON, State).
 
 %%==============================================================================
 %% Utils
@@ -435,6 +455,16 @@ is_whole_number(Float) when is_float(Float) ->
 is_whole_number(_Any) ->
   false.
 
+merge_schemas(B1, B2) when is_boolean(B1), is_boolean(B2) ->
+  B1 andalso B2;
+merge_schemas(false, _Schema2) ->
+  false;
+merge_schemas(_Schema1, false) ->
+  false;
+merge_schemas(true, Schema2) ->
+  Schema2;
+merge_schemas(Schema1, true) ->
+  Schema1;
 merge_schemas(Schema1, Schema2) ->
   maps:merge_with(fun(<<"properties">>, V1, V2) ->
                        maps:merge(V1, V2);
@@ -443,16 +473,22 @@ merge_schemas(Schema1, Schema2) ->
                      (<<"prefixItems">>, V1, V2) ->
                        V1 ++ V2;
                      (<<"unevaluatedItems">>, V1, V2) ->
-                       V1 orelse V2
+                       V1 orelse V2;
+                     (<<"multipleOf">>, V1, V2) ->
+                       lcm(V1, V2);
+                     (<<"unevaluatedProperties">>, V1, V2) ->
+                       merge_schemas(V1, V2);
+                     (<<"contains">>, V1, V2) ->
+                       merge_schemas(V1, V2)
                   end, Schema1, Schema2).
 
-remove_prefix([], List) ->
+remove_prefix([], List, _State) ->
   List;
-remove_prefix(_Prefix, []) ->
+remove_prefix(_Prefix, [], _State) ->
   [];
-remove_prefix([H1 | T1], [H2 | T2] = List) ->
-  case do_validate(H1, H2, #{}) of
-    true -> remove_prefix(T1, T2);
+remove_prefix([H1 | T1], [H2 | T2] = List, State) ->
+  case validate_nested(H1, H2, State) of
+    true -> remove_prefix(T1, T2, State);
     false -> List
   end.
 
@@ -463,3 +499,46 @@ first(F, [H | T]) ->
     true -> {ok, H};
     false -> first(F, T)
   end.
+
+validate_nested(Schema, JSON, State) ->
+  % Drop all elements that only apply for the current level
+  ElementsToDrop = [properties, pattern_properties, items, prefix_items],
+  CleanState = maps:without(ElementsToDrop, State),
+  do_validate(Schema, JSON, CleanState).
+
+get_refd_element([], Schema) ->
+  Schema;
+get_refd_element([H | T], List) when is_list(List) ->
+  get_refd_element(T, lists:nth(erlang:binary_to_integer(H) + 1, List));
+get_refd_element([H | T], Schema) ->
+  get_refd_element(T, maps:get(H, Schema, false));
+get_refd_element(Ref, #{root := Root, defs := Defs, remotes := Remotes}) ->
+  case maps:find(Ref, Remotes) of
+    {ok, Remote} ->
+      Remote;
+    error ->
+      case binary:split(Ref, <<"/">>, [global]) of
+        [<<"#">> | T] ->
+          get_refd_element(T, Root);
+        [Key] ->
+          maps:get(unescape_ref(Key), Defs, false);
+        _ ->
+          % This case happens when the schema has a remote reference that wasn't
+          % provided when calling validate/3
+          false
+      end
+  end.
+
+unescape_ref(Bin) ->
+  Bin2 = binary:replace(Bin, <<"~1">>, <<"/">>, [global]),
+  Bin3 = binary:replace(Bin2, <<"~0">>, <<"~">>, [global]),
+  binary:replace(Bin3, <<"%25">>, <<"%">>, [global]).
+
+% From https://rosettacode.org/wiki/Least_common_multiple#Erlang
+gcd(A, 0) ->
+  A;
+gcd(A, B) ->
+  gcd(B, A rem B).
+
+lcm(A,B) ->
+  abs(A*B div gcd(A,B)).
