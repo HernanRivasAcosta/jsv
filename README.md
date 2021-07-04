@@ -60,8 +60,6 @@ jsv sets a default base URI of ``<<"schema:jsv/root">>`` if no ``$id`` is define
 
 Issues and pull requests are most welcome.
 
-jsv is currently a work in progress
-
 Regarding validation errors, check if there's a failing test covering it. If that's the case, the problem is being looked into, but feel free to open an issue if you feel further information might be of use.
 
 Aditionally, if no test seems to cover the case you have, keep in mind that jsv was tested with the [JSON Schema Test Suite](https://github.com/json-schema-org/JSON-Schema-Test-Suite), if you find a schema that should validate but doesn't (or viceversa), please consider contributing a new test for that repository as well.
