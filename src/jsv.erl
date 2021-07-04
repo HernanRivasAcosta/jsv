@@ -2,7 +2,10 @@
 
 % API
 -export([validate/2, validate/3]).
-
+%% Testing
+%-ifdef(TEST).
+%-export([parse_path/1]).
+%-endif.
 
 %%==============================================================================
 %% API
@@ -12,17 +15,23 @@ validate(JSON, Schema) ->
   validate(JSON, Schema, #{}).
 
 -spec validate(map(), map(), map()) -> boolean().
-validate(JSON, Schema, Schemas) ->
-  do_validate(Schema, JSON, #{root => Schema,
-                              defs => #{},
-                              remotes => Schemas}).
+validate(JSON, Schema, RemoteSchemas) ->
+  State = get_state(Schema, RemoteSchemas),
+  do_validate(Schema, JSON, State).
 
 %%==============================================================================
 %% Checks
 %%==============================================================================
-do_validate(#{<<"$defs">> := NewDefs} = Schema, JSON, State = #{defs := Defs}) ->
-  NewState = State#{defs => maps:merge(NewDefs, Defs)},
-  do_validate(maps:without([<<"$defs">>], Schema), JSON, NewState);
+do_validate(#{<<"$defs">> := _Defs} = Schema, JSON, State) ->
+  do_validate(maps:without([<<"$defs">>], Schema), JSON, State);
+do_validate(#{<<"$comment">> := _Comment} = Schema, JSON, State) ->
+  do_validate(maps:without([<<"$comment">>], Schema), JSON, State);
+do_validate(#{<<"if">> := If} = Schema, JSON, State) ->
+  Then = maps:get(<<"then">>, Schema, undefined),
+  Else = maps:get(<<"else">>, Schema, undefined),
+  handle_if(If, Then, Else, JSON, State) andalso
+  do_validate(maps:without([<<"if">>, <<"then">>, <<"else">>], Schema),
+              JSON, State);
 do_validate(#{<<"type">> := Type} = Schema, JSON, State) ->
   is_of_type(Type, JSON) andalso
   do_validate(maps:without([<<"type">>], Schema), JSON, State);
@@ -43,6 +52,9 @@ do_validate(#{<<"patternProperties">> := Properties} = Schema, JSON, State) ->
 do_validate(#{<<"additionalProperties">> := Properties} = Schema, JSON, State) ->
   validate_additional_properties(Properties, JSON, State) andalso
   do_validate(maps:without([<<"additionalProperties">>], Schema), JSON, State);
+do_validate(#{<<"unevaluatedProperties">> := Properties} = Schema, JSON, State) ->
+  check_unevaluated_properties(Properties, JSON, State) andalso
+  do_validate(maps:without([<<"unevaluatedProperties">>], Schema), JSON, State);
 do_validate(#{<<"maxProperties">> := MaxProperties} = Schema, JSON, State) ->
   max_properties(MaxProperties, JSON) andalso
   do_validate(maps:without([<<"maxProperties">>], Schema), JSON, State);
@@ -86,10 +98,8 @@ do_validate(#{<<"required">> := Required} = Schema, JSON, State) ->
   contains_required_props(Required, JSON) andalso
   do_validate(maps:without([<<"required">>], Schema), JSON, State);
 do_validate(#{<<"allOf">> := AllOf} = Schema, JSON, State) ->
-  NewMap = lists:foldl(fun(false, _) -> false;
-                          (_, false) -> false;
-                          (true, _) -> true;
-                          (SubSchema, Acc) -> merge_schemas(Acc, SubSchema)
+  NewMap = lists:foldl(fun(SubSchema, Acc) ->
+                         merge_schemas(Acc, SubSchema)
                        end, maps:without([<<"allOf">>], Schema), AllOf),
   do_validate(NewMap, JSON, State);
 do_validate(#{<<"prefixItems">> := PrefixItems} = Schema, JSON, State) ->
@@ -118,8 +128,8 @@ do_validate(#{<<"contains">> := Contains} = Schema, JSON, State) ->
                    end,
   contains(Contains, Min, Max, JSON, State) andalso
   do_validate(Schema4, JSON, State);
-do_validate(#{<<"not">> := Items} = Schema, JSON, State) ->
-  items_dont_match(Items, JSON, State) andalso
+do_validate(#{<<"not">> := Not} = Schema, JSON, State) ->
+  doesnt_match(Not, JSON, State) andalso
   do_validate(maps:without([<<"not">>], Schema), JSON, State);
 do_validate(#{<<"anyOf">> := AnyOf} = Schema, JSON, State) ->
   case contains_any_of(AnyOf, JSON, State) of
@@ -146,6 +156,12 @@ do_validate(#{<<"$ref">> := Ref} = Schema, JSON, State) when is_binary(Ref) ->
 do_validate(#{<<"$dynamicRef">> := Ref} = Schema, JSON, State) when is_binary(Ref) ->
   handle_ref(Ref, JSON, State) andalso
   do_validate(maps:without([<<"$dynamicRef">>], Schema), JSON, State);
+do_validate(#{<<"dependentRequired">> := DepRequired} = Schema, JSON, State) ->
+  contains_dependants(DepRequired, JSON, State) andalso
+  do_validate(maps:without([<<"dependentRequired">>], Schema), JSON, State);
+do_validate(#{<<"dependentSchemas">> := DepSchemas} = Schema, JSON, State) ->
+  handle_dependant_schemas(DepSchemas, JSON, State) andalso
+  do_validate(maps:without([<<"dependentSchemas">>], Schema), JSON, State);
 do_validate(true, _JSON, _State) ->
   true;
 do_validate(false, _JSON, _State) ->
@@ -226,6 +242,8 @@ matches_pattern_properties(Patterns, Object, State) when is_map(Object) ->
 matches_pattern_properties(_PatternProperties, _JSON, _State) ->
   true.
 
+validate_additional_properties(true, _JSON, _State) ->
+  true;
 validate_additional_properties(false, Object, State) when is_map(Object) ->
   Properties = maps:keys(maps:get(properties, State, #{})),
   PatternProperties = maps:keys(maps:get(pattern_properties, State, #{})),
@@ -235,12 +253,7 @@ validate_additional_properties(false, Object, State) when is_map(Object) ->
               lists:member(Key, Properties) orelse
               % Or they match at least one pattern
               lists:any(fun(Pattern) ->
-                          case re:run(Key, Pattern) of
-                            {match, _Captured} ->
-                              true;
-                            nomatch ->
-                              false
-                          end
+                          re:run(Key, Pattern) =/= nomatch
                         end, PatternProperties)
             end, maps:keys(Object));
 validate_additional_properties(Schema, Object, State) when is_map(Object) ->
@@ -254,14 +267,9 @@ validate_additional_properties(Schema, Object, State) when is_map(Object) ->
                  lists:member(Key, Properties) orelse
                  % Or they don't match at least one pattern
                  lists:any(fun(Pattern) ->
-                             case re:run(Key, Pattern) of
-                               {match, _Captured} ->
-                                 true;
-                               nomatch ->
-                                 false
-                             end
+                             re:run(Key, Pattern) =/= nomatch
                            end, PatternProperties) orelse
-                 % They need to validate
+                 % validate
                  validate_nested(Schema, Value, State)
             end, true, Object);
 validate_additional_properties(_Schema, _JSON, _State) ->
@@ -364,9 +372,9 @@ items_match(Schema, List, State) when is_list(List) ->
 items_match(_Schema, _JSON, _State) ->
   true.
 
-check_unevaluated_items(_, List, #{items := true}) when is_list(List) ->
-  true;
 check_unevaluated_items(true, List, _State) when is_list(List) ->
+  true;
+check_unevaluated_items(_, List, #{items := true}) when is_list(List) ->
   true;
 check_unevaluated_items(Schema, List, State) when is_list(List) ->
   List2 = remove_prefix(maps:get(prefix_items, State, []), List, State),
@@ -379,6 +387,22 @@ check_unevaluated_items(Schema, List, State) when is_list(List) ->
             end, List3);
 check_unevaluated_items(_Items, _JSON, _State) ->
   true.
+
+check_unevaluated_properties(true, Map, _State) when is_map(Map) ->
+  true;
+check_unevaluated_properties(false, Map, State) when is_map(Map) ->
+  Properties = maps:keys(maps:get(properties, State, #{})),
+  PatternProperties = maps:keys(maps:get(pattern_properties, State, #{})),
+  maps:fold(fun(_Key, _V, false) ->
+                 false;
+               (Key, _V, _Acc) ->
+                 lists:member(Key, Properties) orelse
+                 lists:any(fun(Pattern) ->
+                             re:run(Key, Pattern) =/= nomatch
+                           end, PatternProperties)
+            end, true, Map);
+check_unevaluated_properties(_Properties, _JSON, _State) ->
+  false.
 
 items_are_unique(false, _JSON) ->
   true;
@@ -414,7 +438,7 @@ prefix_matches([Schema | T1], [JSON | T2], State) ->
 prefix_matches(_Schemas, _JSON, _State) ->
   true.
 
-items_dont_match(Schema, JSON, State) ->
+doesnt_match(Schema, JSON, State) ->
   not validate_nested(Schema, JSON, State).
 
 contains_any_of(AnyOf, JSON, State) when is_list(AnyOf) ->
@@ -441,6 +465,40 @@ contains_one_of(OneOf, JSON, State) when is_list(OneOf) ->
 contains_one_of(_Required, _JSON, _State) ->
   true.
 
+contains_dependants(DepRequired, Map, _State) when is_map(Map) ->
+  maps:fold(fun(_Key, _Keys, false) ->
+                 false;
+               (Key, Keys, true) ->
+                 (not maps:is_key(Key, Map)) orelse
+                 lists:all(fun(K) -> maps:is_key(K, Map) end, Keys)
+            end, true, DepRequired);
+contains_dependants(_DepRequired, _JSON, _State) ->
+  true.
+
+handle_dependant_schemas(DepSchemas, Map, State) when is_map(Map) ->
+  maps:fold(fun(_Key, _Schema, false) ->
+                 false;
+               (Key, Schema, true) ->
+                 (not maps:is_key(Key, Map)) orelse
+                 validate_nested(Schema, Map, State)
+            end, true, DepSchemas);
+handle_dependant_schemas(_DepSchemas, _JSON, _State) ->
+  true.
+
+handle_if(_If, undefined, undefined, _JSON, _State) ->
+  true;
+handle_if(If, Then, Else, JSON, State) ->
+  case validate_nested(If, JSON, State) of
+    true ->
+      Then =:= undefined orelse validate_nested(Then, JSON, State);
+    false ->
+      Else =:= undefined orelse validate_nested(Else, JSON, State)
+  end.
+
+handle_ref(Refs, JSON, State) when is_list(Refs) ->
+  lists:all(fun(Ref) ->
+              handle_ref(Ref, JSON, State)
+            end, Refs);
 handle_ref(Ref, JSON, State) ->
   % Don't call validate_nested
   do_validate(get_refd_element(Ref, State), JSON, State).
@@ -472,12 +530,16 @@ merge_schemas(Schema1, Schema2) ->
                        V1 ++ V2;
                      (<<"prefixItems">>, V1, V2) ->
                        V1 ++ V2;
+                     (<<"enum">>, V1, V2) ->
+                       V1 ++ V2;
                      (<<"unevaluatedItems">>, V1, V2) ->
                        V1 orelse V2;
                      (<<"multipleOf">>, V1, V2) ->
                        lcm(V1, V2);
                      (<<"unevaluatedProperties">>, V1, V2) ->
                        merge_schemas(V1, V2);
+                     (<<"$ref">>, V1, V2) ->
+                       [V1, V2];
                      (<<"contains">>, V1, V2) ->
                        merge_schemas(V1, V2)
                   end, Schema1, Schema2).
@@ -506,33 +568,198 @@ validate_nested(Schema, JSON, State) ->
   CleanState = maps:without(ElementsToDrop, State),
   do_validate(Schema, JSON, CleanState).
 
-get_refd_element([], Schema) ->
-  Schema;
-get_refd_element([H | T], List) when is_list(List) ->
-  get_refd_element(T, lists:nth(erlang:binary_to_integer(H) + 1, List));
-get_refd_element([H | T], Schema) ->
-  get_refd_element(T, maps:get(H, Schema, false));
-get_refd_element(Ref, #{root := Root, defs := Defs, remotes := Remotes}) ->
-  case maps:find(Ref, Remotes) of
-    {ok, Remote} ->
-      Remote;
-    error ->
-      case binary:split(Ref, <<"/">>, [global]) of
-        [<<"#">> | T] ->
-          get_refd_element(T, Root);
-        [Key] ->
-          maps:get(unescape_ref(Key), Defs, false);
-        _ ->
-          % This case happens when the schema has a remote reference that wasn't
-          % provided when calling validate/3
-          false
+get_refd_element(Ref, #{uris := URIs} = State) ->
+  ResolvedRef = resolve_ref(Ref, State),
+  UnescapedRef = unescape_ref(ResolvedRef),
+  case longest_matching_uri(UnescapedRef, State) of
+    UnescapedRef ->
+      maps:get(schema, maps:get(UnescapedRef, URIs));
+    LongestMatch ->
+      #{schema := Schema,
+        anchors := Anchors,
+        dynamic_anchors := DynamicAnchors} = maps:get(LongestMatch, URIs),
+      LongestMatchSize = erlang:byte_size(LongestMatch),
+      SubRef = case ResolvedRef of
+                 <<LongestMatch:LongestMatchSize/binary, "#", Rest/binary>> ->
+                   Rest;
+                 <<LongestMatch:LongestMatchSize/binary, Rest/binary>> ->
+                   Rest;
+                 ResolvedRef ->
+                   ResolvedRef
+               end,
+      % Check if it's an anchor
+      case maps:find(SubRef, Anchors) of
+        {ok, AnchorSchema} ->
+          AnchorSchema;
+        error ->
+          % Check if it's a dynamic anchor
+          case maps:find(SubRef, DynamicAnchors) of
+            {ok, DynamicAnchorSchema} ->
+              DynamicAnchorSchema;
+            error ->
+              case resolve_path(SubRef, Schema) of
+                error ->
+                  error = Ref;
+                Other ->
+                  Other
+              end
+          end
       end
   end.
 
-unescape_ref(Bin) ->
-  Bin2 = binary:replace(Bin, <<"~1">>, <<"/">>, [global]),
-  Bin3 = binary:replace(Bin2, <<"~0">>, <<"~">>, [global]),
-  binary:replace(Bin3, <<"%25">>, <<"%">>, [global]).
+%longest_matching_uri(<<"#", Rest/binary>>, #{root := Root} = State) ->
+%  longest_matching_uri(<<Root/binary, Rest/binary>>, State);
+longest_matching_uri(Path, #{uris := URIs, root := Root}) ->
+  maps:fold(fun(URI, _Schema, Acc) when erlang:byte_size(URI) > erlang:byte_size(Acc)  ->
+                 case is_prefix(URI, Path) of
+                   true ->
+                     URI;
+                   false ->
+                     Acc
+                 end;
+               (_URI, _Schema, Acc) ->
+                 Acc
+            end, Root, URIs).
+
+is_prefix(A, B) ->
+  PrefixSize = erlang:byte_size(A),
+  case binary:match(B, A) of
+    {0, PrefixSize} ->
+      true;
+    _ ->
+      false
+  end.
+
+resolve_path([], Schema) ->
+  Schema;
+resolve_path([<<"">> | T], Schema) ->
+  resolve_path(T, Schema);
+resolve_path([H | T], List) when is_list(List) ->
+  resolve_path(T, lists:nth(erlang:binary_to_integer(H) + 1, List));
+resolve_path([H | T], Map) when is_map(Map) ->
+  case maps:find(unescape_ref(H), Map) of
+    {ok, Schema} ->
+      resolve_path(T, Schema);
+    error ->
+      error
+  end;
+resolve_path(Bin, Schema) ->
+  resolve_path(binary:split(Bin, <<"/">>, [global]), Schema).
+
+resolve_ref(<<"#", Rest/binary>>, #{root := Root}) ->
+  <<Root/binary, Rest/binary>>;
+resolve_ref(Ref, _State) ->
+  Ref.
+
+unescape_ref(Ref) ->
+  Ref2 = binary:replace(Ref, <<"~1">>, <<"/">>, [global]),
+  Ref3 = binary:replace(Ref2, <<"~0">>, <<"~">>, [global]),
+  binary:replace(Ref3, <<"%25">>, <<"%">>, [global]).
+
+get_state(RootSchema, RemoteSchemas) ->
+  State = case is_map(RootSchema) of
+            true ->
+              RootId = get_root_id(RootSchema),
+              BaseState = #{uris => #{},
+                            root => RootId},
+              extract_refs(undefined, set_schema_id(RootId, RootSchema), BaseState);
+            false ->
+              DefaultId = get_root_id(default),
+              #{uris => #{DefaultId => #{schema => RootSchema,
+                                         anchors => #{},
+                                         dynamic_anchors => #{}}},
+                root => DefaultId}
+          end,
+  maps:fold(fun(K, V, Acc) ->
+              extract_refs(undefined, set_schema_id(K, V), Acc)
+            end, State, RemoteSchemas).
+
+extract_refs(Parent, #{<<"$id">> := Id} = Schema, #{uris := URIs} = Acc)
+  when is_binary(Id) ->
+  NewRefTable = #{schema => Schema,
+                  anchors => #{},
+                  dynamic_anchors => #{}},
+  FinalId = case is_uri(Id) of
+              true ->
+                Id;
+              false ->
+                merge_uris(Parent, Id)
+            end,
+  NewAcc = Acc#{uris => URIs#{FinalId => NewRefTable}},
+  extract_refs(FinalId, maps:without([<<"$id">>], Schema), NewAcc);
+extract_refs(Parent, Schema, Acc) when is_map(Schema), is_binary(Parent) ->
+  maps:fold(fun(<<"$anchor">>, Anchor, StateIn) ->
+                 set_anchors(Parent, Anchor, Schema, StateIn);
+               (<<"$dynamicAnchor">>, DynamicAnchor, StateIn) ->
+                 set_dynamic_anchors(Parent, DynamicAnchor, Schema, StateIn);
+               (<<"enum">>, _Enum, StateIn) ->
+                 StateIn;
+               (<<"const">>, _Enum, StateIn) ->
+                 StateIn;
+               (K, V, StateIn) ->
+                 case is_map(V) andalso known_keyword(K) of
+                   true ->
+                     extract_refs(Parent, V, StateIn);
+                   false ->
+                     StateIn
+                 end
+            end, Acc, Schema).
+
+is_uri(Bin) ->
+  % This regex checks if the binary starts with a schema since it's required for
+  % it to be a URI
+  case re:run(Bin, <<"^[a-z][a-z0-9\.\+\-]+:">>) of
+    {match,[{0, _}]} ->
+      true;
+    _ ->
+      false
+  end.
+
+merge_uris(Parent, URI) ->
+  case re:run(Parent, <<"^[a-z]+://">>) of
+    {match, [{0, Start}]} ->
+      L = erlang:byte_size(Parent),
+      Matches = binary:matches(Parent, <<"/">>, [{scope, {Start, L - Start}}]),
+      {LastMatchPosition, 1} = lists:last(Matches),
+      <<(binary:part(Parent, 0, LastMatchPosition + 1))/binary, URI/binary>>;
+    _ ->
+      URI
+  end.
+
+set_anchors(Parent, Anchor, Schema, #{uris := URIs} = RefTable) ->
+  #{anchors := Anchors} = URIDef = maps:get(Parent, URIs),
+  NewAnchors = maps:put(Anchor, Schema, Anchors),
+  RefTable#{uris => URIs#{Parent => URIDef#{anchors => NewAnchors}}}.
+
+set_dynamic_anchors(Parent, Anchor, Schema, #{uris := URIs} = RefTable) ->
+  #{dynamic_anchors := Anchors} = URIDef = maps:get(Parent, URIs),
+  NewAnchors = maps:put(Anchor, Schema, Anchors),
+  RefTable#{uris => URIs#{Parent => URIDef#{dynamic_anchors => NewAnchors}}}.
+
+get_root_id(#{<<"$id">> := Id}) ->
+  Id;
+get_root_id(_Schema) ->
+  % "jsv/root" is the application dependant default uri for documents without an
+  % an $id. See: https://datatracker.ietf.org/doc/html/rfc3986#section-5.1.4
+  <<"schema:jsv/root">>.
+
+set_schema_id(_Id, #{<<"$id">> := _} = Schema) ->
+  Schema;
+set_schema_id(Id, Schema) ->
+  Schema#{<<"$id">> => Id}.
+
+known_keyword(_Keyword) ->
+  true.
+%  Keywords = [<<"$defs">>, <<"type">>, <<"pattern">>, <<"propertyNames">>,
+%              <<"properties">>, <<"patternProperties">>, <<"$dynamicRef">>,
+%              <<"additionalProperties">>, <<"maxProperties">>, <<"not">>,
+%              <<"minProperties">>, <<"maxItems">>, <<"minItems">>, <<"$ref">>,
+%              <<"maximum">>, <<"minimum">>, <<"exclusiveMaximum">>, <<"anyOf">>,
+%              <<"exclusiveMinimum">>, <<"maxLength">>, <<"minLength">>,
+%              <<"multipleOf">>, <<"const">>, <<"enum">>, <<"required">>,
+%              <<"allOf">>, <<"prefixItems">>, <<"items">>, <<"oneOf">>,
+%              <<"unevaluatedItems">>, <<"uniqueItems">>, <<"contains">>],
+%  lists:member(Keyword, Keywords).
 
 % From https://rosettacode.org/wiki/Least_common_multiple#Erlang
 gcd(A, 0) ->
@@ -541,4 +768,4 @@ gcd(A, B) ->
   gcd(B, A rem B).
 
 lcm(A,B) ->
-  abs(A*B div gcd(A,B)).
+  abs(A * B div gcd(A, B)).

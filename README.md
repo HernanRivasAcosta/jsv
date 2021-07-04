@@ -2,7 +2,7 @@
 
 **J**SON **S**chema **V**alidator
 
-jsv is an erlang implementation of [JSON Schemas](https://json-schema.org/) that aims to fully support every current and previous draft.
+jsv is an erlang implementation of [JSON Schemas](https://json-schema.org/) that aims to fully support the latest draft (and as many of the previous drafts as possible).
 
 ## Usage
 
@@ -16,7 +16,7 @@ Data = jiffy:decode(JSONString, [return_maps]).
 IsValid = jsv:validate(Data, Schema). % true | false
 ```
 
-~~If your schema references other schemas, call ``jsv:validate/3`` and pass a map of schemas as the third argument. This map should have keys matching the references in your main schema (the keys should be binaries).~~ Not yet implemented.
+If your schema references other schemas, call ``jsv:validate/3`` and pass a map of schemas as the third argument. This map key's need to be the URIs of the schemas they point to (as erlang binaries) and match the root ``$id`` element if one is present (jsv will not check if this is the case).
 
 ## Tests
 
@@ -34,20 +34,34 @@ This will generate a suite for each JSON file on the tests directory from JSON-S
 rebar3 ct
 ```
 
-It currently passes 5873 of the 6546 tests in the repository (due to the lack of refs, defs and anchors). The aim is to reach 6546.
+It currently passes 5960 of the 6546 tests in the repository (only 81 out of 1007 errors in the 'latest' test SUITE for the 2020 draft). The aim is to reach all 6546, though deprecated functionality might not be handled and might bring the number down.
 
-## Limitations
+## Notes
 
-- jsv was designed to work with [jiffy](https://github.com/davisp/jiffy) generated maps and has not been tested with any other json library, [jsx](https://github.com/talentdeficit/jsx) probably also works, but it might not.
+### Default URI
 
-- jsv expects the schema to be valid. The behaviour of jsv when faced with an invalid schema is undefined.
+jsv sets a default base URI of ``<<"schema:jsv/root">>`` if no ``$id`` is defined on the root of the schema in accordance with [the RFC](https://json-schema.org/draft/2020-12/json-schema-core.html#rfc.section.9.1.1).
 
-- jsv only returns ``true`` or ``false``, there's no way to obtain the specific error or annotation. In short, jsv only supports the Flag output format [as defined on the spec](https://json-schema.org/draft/2020-12/json-schema-core.html#rfc.section.12).
+### Limitations
 
-- Please note that jsv does not currently implement refs, defs or anchors (it's a WIP)
+- jsv was designed to work with [jiffy](https://github.com/davisp/jiffy) generated maps and has not been tested with any other json library, [jsx](https://github.com/talentdeficit/jsx) probably also works, but it has not been tested.
+
+- jsv expects the schema to be valid. The behaviour of jsv when faced with an invalid schema is undefined. This is specially true for bad references which can easily match random stuff.
+
+- jsv's methods only return ``true`` or ``false``. There's no way to obtain the specific error or any annotations (nor are there plans to add this). In short, jsv only supports the Flag output format [as defined on the RFC](https://json-schema.org/draft/2020-12/json-schema-core.html#rfc.section.12).
+
+- jsv currently treats dynamic references and dynamic anchors like normal references and anchors.
+
+- ``unevaluatedItems`` and ``unevaluatedProperties`` are currently only partially implemented (they don't interact well with ``anyOf`` and ``allOf``).
+
+- jsv does not yet support ``$vocabulary``
 
 ## Contributing
 
 Issues and pull requests are most welcome.
 
-Regarding validation errors, keep in mind that jsv was tested with the [JSON Schema Test Suite](https://github.com/json-schema-org/JSON-Schema-Test-Suite), if you find a schema that should validate but doesn't (or viceversa), please consider contributing a new test for that repository as well.
+jsv is currently a work in progress
+
+Regarding validation errors, check if there's a failing test covering it. If that's the case, the problem is being looked into, but feel free to open an issue if you feel further information might be of use.
+
+Aditionally, if no test seems to cover the case you have, keep in mind that jsv was tested with the [JSON Schema Test Suite](https://github.com/json-schema-org/JSON-Schema-Test-Suite), if you find a schema that should validate but doesn't (or viceversa), please consider contributing a new test for that repository as well.

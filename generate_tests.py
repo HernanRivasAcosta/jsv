@@ -5,6 +5,7 @@ import os
 import os.path
 import json
 import re
+import urllib.request
 
 ##
 ## Utils
@@ -48,7 +49,7 @@ def toValidAtom(string):
 def uniqueAtomName(name, names, counter = 0):
   atomName = toValidAtom(f'test_{name}')
   if (counter > 0):
-    atomName += '_%d' % counter
+    atomName += f'_{counter}'
   if (atomName in names):
     return uniqueAtomName(name, names, counter + 1)
   else:
@@ -73,14 +74,41 @@ def groupDeclaration(group):
   casesString = ',\n     '.join(properties['caseNames'])
   return f'{{{name},\n    [parallel],\n    [{casesString}]}}'
 
+def schemaToString(schemaTuple):
+  (ref, schema) = schemaTuple
+  return f'<<"{ref}">> => jiffy:decode(<<{printableBinaryJSON(schema)}>>, [return_maps])'
+
 ##
 ## Main
 ##
 # Get all tests:
-testsPath = 'deps/JSON-Schema-Test-Suite/tests'
+suitePath = 'deps/JSON-Schema-Test-Suite'
+testsPath = os.path.join(suitePath, 'tests')
 generatedTestsPath = 'test/generated'
 if not os.path.exists(generatedTestsPath):
   os.makedirs(generatedTestsPath)
+
+# Get the referenced schemas
+referencedSchemas = []
+# Get all schemas from the test suite
+referencedSchemasPath = os.path.join(suitePath, 'remotes')
+for referencedSchema in os.listdir(referencedSchemasPath):
+  referencedSchemaPath = os.path.join(referencedSchemasPath, referencedSchema)
+  if (os.path.isfile(referencedSchemaPath)):
+    with open(referencedSchemaPath, 'r') as f:
+      referencedSchemas.append((f'http://localhost:1234/{referencedSchema}', json.load(f)))
+# Download all schemas referenced by tests
+referencedSchemaURLs = ['https://json-schema.org/draft/2020-12/schema',
+                        'https://json-schema.org/draft/2020-12/meta/core',
+                        'https://json-schema.org/draft/2020-12/meta/applicator',
+                        'https://json-schema.org/draft/2020-12/meta/unevaluated',
+                        'https://json-schema.org/draft/2020-12/meta/validation',
+                        'https://json-schema.org/draft/2020-12/meta/meta-data',
+                        'https://json-schema.org/draft/2020-12/meta/format-annotation',
+                        'https://json-schema.org/draft/2020-12/meta/content']
+for url in referencedSchemaURLs:
+  with urllib.request.urlopen(url) as openedURL:
+    referencedSchemas.append((url, json.loads(openedURL.read().decode())))
 
 if (len(sys.argv) > 1 and sys.argv[1] != 'all'):
   suites = [sys.argv[1]]
@@ -146,7 +174,9 @@ for suite in suites:
         # Add the init functions
         content += '-spec init_per_suite(config()) -> config().\n'
         content += 'init_per_suite(Config) ->\n'
-        content += '  Remotes = #{},\n'
+        content += '  Remotes = #{'
+        content += ',\n              '.join(map(schemaToString, referencedSchemas))
+        content += '},\n'
         content += '  [{remotes, Remotes} | Config].\n\n'
         content += '-spec init_per_group(atom(), config()) -> config().\n'
         for groupName, groupData in groups.items():
@@ -172,14 +202,14 @@ for suite in suites:
             content +=  '  Schema = proplists:get_value(schema, Config),\n'
             content += f'  Data = jiffy:decode(<<{testCase["data"]}>>, [return_maps]),\n'
             if (testCase['valid']):
-              content += '  ct:log("data: ~p, schema: ~p, expected: ~p", [Data, Schema, true]),\n'
+              content += '  ct:log("Data = ~p.~nSchema = ~p.~nExpected = ~p.", [Data, Schema, true]),\n'
               content += '  true = '
             else:
-              content += '  ct:log("data: ~p, schema: ~p, expected: ~p", [Data, Schema, false]),\n'
+              content += '  ct:log("Data = ~p.~nSchema = ~p.~nExpected = ~p.", [Data, Schema, false]),\n'
               content += '  false = '
             #content += '  _ = '
             content += 'jsv:validate(Data, Schema, Remotes),\n'
             content += '  ok.'
         # Write the file
-        with open(os.path.join(generatedTestsPath, suiteName + '.erl'), 'w') as f:
+        with open(os.path.join(generatedTestsPath, f'{suiteName}.erl'), 'w') as f:
           f.write(content)
